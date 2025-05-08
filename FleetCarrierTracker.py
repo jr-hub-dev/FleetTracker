@@ -5,9 +5,9 @@ import pandas as pd
 from tabulate import tabulate
 
 # === CONFIGURATION ===
-CLIENT_ID = 'YOUR_CLIENT_ID'
+CLIENT_ID = '76f2a525-a260-44b6-86a7-63a793381966'
 CLIENT_SECRET = 'YOUR_CLIENT_SECRET'
-REDIRECT_URI = 'https://example.com/callback'
+REDIRECT_URI = 'https://jr-hub-dev.github.io/FleetTracker/'
 AUTH_URL = 'https://auth.frontierstore.net/oauth/authorize'
 TOKEN_URL = 'https://auth.frontierstore.net/token'
 API_BASE_URL = 'https://companion.orerve.net'
