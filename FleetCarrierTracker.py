@@ -1,45 +1,28 @@
-import os
+import requests
 import json
 import time
-import requests
-import threading
 import pandas as pd
-from flask import Flask, request
 from tabulate import tabulate
 
 # === CONFIGURATION ===
-CLIENT_ID = 'YOUR_CLIENT_ID'  # 🔑 À remplacer
-CLIENT_SECRET = 'YOUR_CLIENT_SECRET'  # 🔑 À remplacer
-REDIRECT_URI = 'http://localhost:8000/callback'
+CLIENT_ID = 'YOUR_CLIENT_ID'
+CLIENT_SECRET = 'YOUR_CLIENT_SECRET'
+REDIRECT_URI = 'https://example.com/callback'
+AUTH_URL = 'https://auth.frontierstore.net/oauth/authorize'
+TOKEN_URL = 'https://auth.frontierstore.net/token'
 API_BASE_URL = 'https://companion.orerve.net'
 CSV_FILE = 'materials_needed.csv'
 TOKENS_FILE = 'tokens.json'
 
-# === GLOBAL ===
-app = Flask(__name__)
-auth_code = None
-
-# === TOKEN STORAGE ===
-def load_tokens():
-    if not os.path.exists(TOKENS_FILE):
-        return None
-    with open(TOKENS_FILE, 'r', encoding='utf-8') as f:
-        return json.load(f)
-
-def save_tokens(tokens):
-    with open(TOKENS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(tokens, f, indent=4)
-    print("[INFO] Tokens sauvegardés.")
-
-# === AUTH ===
 def get_authorization_url():
     return (
-        f"https://auth.frontierstore.net/oauth/authorize?"
-        f"client_id={CLIENT_ID}&response_type=code&redirect_uri={REDIRECT_URI}&scope=capi"
+        f"{AUTH_URL}?client_id={CLIENT_ID}"
+        f"&response_type=code"
+        f"&redirect_uri={REDIRECT_URI}"
+        f"&scope=capi"
     )
 
 def exchange_code_for_token(code):
-    url = "https://auth.frontierstore.net/token"
     data = {
         'grant_type': 'authorization_code',
         'code': code,
@@ -47,28 +30,31 @@ def exchange_code_for_token(code):
         'client_id': CLIENT_ID,
         'client_secret': CLIENT_SECRET
     }
-    response = requests.post(url, data=data)
+    response = requests.post(TOKEN_URL, data=data)
     return response.json()
 
 def refresh_access_token(refresh_token):
-    url = "https://auth.frontierstore.net/token"
     data = {
         'grant_type': 'refresh_token',
         'refresh_token': refresh_token,
         'client_id': CLIENT_ID,
         'client_secret': CLIENT_SECRET
     }
-    response = requests.post(url, data=data)
+    response = requests.post(TOKEN_URL, data=data)
     return response.json()
 
-# === FLASK ROUTE ===
-@app.route('/callback')
-def callback():
-    global auth_code
-    auth_code = request.args.get('code')
-    return "Authorization code received! You can close this window."
+def save_tokens(tokens):
+    with open(TOKENS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(tokens, f, indent=4)
+    print("[INFO] Tokens saved.")
 
-# === DATA ===
+def load_tokens():
+    try:
+        with open(TOKENS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+
 def load_materials_needed():
     df = pd.read_csv(CSV_FILE, sep=';', encoding='utf-8')
     return {row['Materiau'].strip().upper(): row['Quantite_Demandee'] for idx, row in df.iterrows()}
@@ -79,7 +65,7 @@ def fetch_fleet_carrier_status(token):
     if response.status_code == 200:
         return response.json()
     elif response.status_code == 401:
-        print("[WARN] Token expiré ou invalide.")
+        print("[WARN] Token expired or invalid.")
     else:
         print(f"[ERROR] API Error: {response.status_code} {response.text}")
     return None
@@ -96,53 +82,40 @@ def display_progress(inventory, materials_needed):
     print(tabulate(table, headers=['Material', 'Required', 'In Cargo', 'Remaining', 'Status'], tablefmt='grid'))
     print("[=== End of Report ===]\n")
 
-# === MAIN FLOW ===
-def main_flow():
+def main():
     tokens = load_tokens()
-
-    if tokens:
-        print("[INFO] Tokens existants trouvés. Tentative d'utilisation...")
-    else:
-        print(f"[INFO] Visit this URL to authorize: {get_authorization_url()}")
-        # Start Flask in background to capture code
-        threading.Thread(target=lambda: app.run(port=8000)).start()
-
-        # Wait for auth code
-        while not auth_code:
-            time.sleep(1)
-
-        print("[INFO] Exchanging code for tokens...")
-        tokens = exchange_code_for_token(auth_code)
+    if not tokens:
+        print("[INFO] Please authorize this app by visiting the following URL:")
+        print(get_authorization_url())
+        code = input("[INPUT] After authorizing, paste the ?code= value here: ").strip()
+        tokens = exchange_code_for_token(code)
         if 'access_token' not in tokens:
-            print("[ERROR] Échec de récupération du token.")
-            exit(1)
+            print("[ERROR] Failed to obtain tokens.")
+            return
         save_tokens(tokens)
 
-    access_token = tokens.get('access_token')
-    refresh_token_value = tokens.get('refresh_token')
-
+    access_token = tokens['access_token']
+    refresh_token_value = tokens['refresh_token']
     materials_needed = load_materials_needed()
 
     while True:
         data = fetch_fleet_carrier_status(access_token)
-
         if data and 'fleet_carrier' in data:
             carrier_inventory = data['fleet_carrier'].get('cargo', {}).get('inventory', [])
             display_progress(carrier_inventory, materials_needed)
         elif data is None:
-            # Token peut être expiré, tentative de refresh
-            print("[INFO] Tentative de rafraîchissement du token...")
+            print("[INFO] Attempting token refresh...")
             refreshed = refresh_access_token(refresh_token_value)
             if 'access_token' in refreshed:
                 access_token = refreshed['access_token']
                 refresh_token_value = refreshed['refresh_token']
                 save_tokens(refreshed)
-                print("[INFO] Token rafraîchi avec succès.")
+                print("[INFO] Token refreshed successfully.")
             else:
-                print("[ERROR] Rafraîchissement échoué. Veuillez réauthentifier.")
+                print("[ERROR] Token refresh failed. Please re-authorize.")
+                tokens = None
                 break
-
-        time.sleep(60)  # Actualise toutes les 60 secondes
+        time.sleep(60)  # Refresh every minute
 
 if __name__ == "__main__":
-    main_flow()
+    main()
