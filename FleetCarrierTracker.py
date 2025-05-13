@@ -1,121 +1,82 @@
 import requests
-import json
+import csv
 import time
-import pandas as pd
 from tabulate import tabulate
 
-# === CONFIGURATION ===
+# === CONFIG ===
 CLIENT_ID = '76f2a525-a260-44b6-86a7-63a793381966'
-CLIENT_SECRET = 'YOUR_CLIENT_SECRET'
+CLIENT_SECRET = '84a3c017-b5ce-4abd-9138-7ee3acea35ad'
 REDIRECT_URI = 'https://jr-hub-dev.github.io/FleetTracker/'
-AUTH_URL = 'https://auth.frontierstore.net/oauth/authorize'
 TOKEN_URL = 'https://auth.frontierstore.net/token'
-API_BASE_URL = 'https://companion.orerve.net'
-CSV_FILE = 'materials_needed.csv'
-TOKENS_FILE = 'tokens.json'
+AUTH_URL = 'https://auth.frontierstore.net/auth'
+API_URL = 'https://companion.orerve.net/profile'  # Frontier Companion API
 
-def get_authorization_url():
-    return (
-        f"{AUTH_URL}?client_id={CLIENT_ID}"
-        f"&response_type=code"
-        f"&redirect_uri={REDIRECT_URI}"
-        f"&scope=capi"
-    )
+# === STEP 1: GET CODE ===
+print("[INFO] Visit the following URL in your browser to authorize:")
+print(f"{AUTH_URL}?client_id={CLIENT_ID}&response_type=code&redirect_uri={REDIRECT_URI}&scope=capi")
+authorization_code = input("[INPUT] Paste the ?code= value here: ")
 
-def exchange_code_for_token(code):
-    data = {
-        'grant_type': 'authorization_code',
-        'code': code,
-        'redirect_uri': REDIRECT_URI,
-        'client_id': CLIENT_ID,
-        'client_secret': CLIENT_SECRET
-    }
-    response = requests.post(TOKEN_URL, data=data)
-    return response.json()
+# === STEP 2: EXCHANGE CODE FOR TOKEN ===
+data = {
+    'grant_type': 'authorization_code',
+    'code': authorization_code,
+    'client_id': CLIENT_ID,
+    'client_secret': CLIENT_SECRET,
+    'redirect_uri': REDIRECT_URI,
+}
 
-def refresh_access_token(refresh_token):
-    data = {
-        'grant_type': 'refresh_token',
-        'refresh_token': refresh_token,
-        'client_id': CLIENT_ID,
-        'client_secret': CLIENT_SECRET
-    }
-    response = requests.post(TOKEN_URL, data=data)
-    return response.json()
+response = requests.post(TOKEN_URL, data=data)
+if response.status_code != 200:
+    print("[ERROR] Failed to get token:", response.text)
+    exit()
 
-def save_tokens(tokens):
-    with open(TOKENS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(tokens, f, indent=4)
-    print("[INFO] Tokens saved.")
+tokens = response.json()
+access_token = tokens['access_token']
+print("[SUCCESS] Access token obtained.")
 
-def load_tokens():
+# === LOAD MATERIALS NEEDED ===
+materials_needed = {}
+with open('materials_needed.csv', newline='', encoding='utf-8') as csvfile:
+    reader = csv.reader(csvfile)
+    next(reader, None)  # skip header if present
+    for row in reader:
+        material, quantity = row
+        materials_needed[material.strip().lower()] = int(quantity.strip())
+
+# === POLL LOOP ===
+headers = {'Authorization': f'Bearer {access_token}'}
+
+while True:
+    resp = requests.get(API_URL, headers=headers)
+    if resp.status_code != 200:
+        print("[ERROR] Failed to fetch carrier data:", resp.text)
+        time.sleep(10)
+        continue
+
+    data = resp.json()
+
+    # Find fleet carrier cargo (this assumes you're owner)
     try:
-        with open(TOKENS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return None
+        cargo_list = data['fleetCarrier']['cargo']
+    except KeyError:
+        print("[ERROR] Could not find fleet carrier cargo in API response.")
+        time.sleep(10)
+        continue
 
-def load_materials_needed():
-    df = pd.read_csv(CSV_FILE, sep=';', encoding='utf-8')
-    return {row['Materiau'].strip().upper(): row['Quantite_Demandee'] for idx, row in df.iterrows()}
-
-def fetch_fleet_carrier_status(token):
-    headers = {'Authorization': f'Bearer {token}'}
-    response = requests.get(f"{API_BASE_URL}/v4/profile", headers=headers)
-    if response.status_code == 200:
-        return response.json()
-    elif response.status_code == 401:
-        print("[WARN] Token expired or invalid.")
-    else:
-        print(f"[ERROR] API Error: {response.status_code} {response.text}")
-    return None
-
-def display_progress(inventory, materials_needed):
-    tracked_cargo = {item['name'].strip().upper(): item['quantity'] for item in inventory}
-    table = []
-    for mat_needed, qty_needed in materials_needed.items():
-        qty_in_cargo = tracked_cargo.get(mat_needed, 0)
-        reste = max(qty_needed - qty_in_cargo, 0)
-        status = '✅ COMPLETED' if reste == 0 else ''
-        table.append([mat_needed, qty_needed, qty_in_cargo, reste, status])
-    print("\n[=== Fleet Carrier Cargo Tracking ===]")
-    print(tabulate(table, headers=['Material', 'Required', 'In Cargo', 'Remaining', 'Status'], tablefmt='grid'))
-    print("[=== End of Report ===]\n")
-
-def main():
-    tokens = load_tokens()
-    if not tokens:
-        print("[INFO] Please authorize this app by visiting the following URL:")
-        print(get_authorization_url())
-        code = input("[INPUT] After authorizing, paste the ?code= value here: ").strip()
-        tokens = exchange_code_for_token(code)
-        if 'access_token' not in tokens:
-            print("[ERROR] Failed to obtain tokens.")
-            return
-        save_tokens(tokens)
-
-    access_token = tokens['access_token']
-    refresh_token_value = tokens['refresh_token']
-    materials_needed = load_materials_needed()
-
-    while True:
-        data = fetch_fleet_carrier_status(access_token)
-        if data and 'fleet_carrier' in data:
-            carrier_inventory = data['fleet_carrier'].get('cargo', {}).get('inventory', [])
-            display_progress(carrier_inventory, materials_needed)
-        elif data is None:
-            print("[INFO] Attempting token refresh...")
-            refreshed = refresh_access_token(refresh_token_value)
-            if 'access_token' in refreshed:
-                access_token = refreshed['access_token']
-                refresh_token_value = refreshed['refresh_token']
-                save_tokens(refreshed)
-                print("[INFO] Token refreshed successfully.")
-            else:
-                print("[ERROR] Token refresh failed. Please re-authorize.")
-                tokens = None
+    # Build comparison table
+    report = []
+    for mat, needed_qty in materials_needed.items():
+        in_cargo = 0
+        for item in cargo_list:
+            name = item.get('name', '').strip().lower()
+            qty = item.get('qty', 0)
+            if mat in name:
+                in_cargo = qty
                 break
-        time.sleep(60)  # Refresh every minute
+        remaining = max(needed_qty - in_cargo, 0)
+        report.append([mat, needed_qty, in_cargo, remaining])
 
-if __name__ == "__main__":
-    main()
+    print("\n[=== Fleet Carrier Cargo Progress ===]")
+    print(tabulate(report, headers=['Material', 'Needed', 'In Carrier', 'Remaining'], tablefmt='grid'))
+    print("[INFO] Updating again in 60 seconds...\n")
+    time.sleep(60)
